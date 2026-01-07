@@ -31,3 +31,4 @@ Komentáře začínají `#`.
 ## Poznámka
 SteamCMD download může trvat (mapy jsou velké). Nová verze instalátoru streamuje výstup SteamCMD live, takže uvidíš progress a nebude to vypadat, že to "zamrzlo".
 # starcore_rp_installer
+# starcore_rp_installer
