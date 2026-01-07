@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 import argparse, json, os, re, subprocess, sys, time
 from datetime import datetime, timezone
+from inspect import signature
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.request import Request, urlopen
 
 # Local dependency resolver (same folder)
@@ -199,6 +200,38 @@ def cmd_freshness(a):
         print(f"[Freshness] FAIL count={bad}")
         sys.exit(2)
 
+def _parse_optional_int(val: str, default: int) -> int:
+    if val is None:
+        return default
+    text = str(val).strip()
+    if not text:
+        return default
+    try:
+        return int(text)
+    except ValueError:
+        return default
+
+
+def _resolver_cfg(**kwargs):
+    if ResolverConfig is None:
+        return None
+    try:
+        allowed = set(signature(ResolverConfig).parameters.keys())
+        filtered = {k: v for k, v in kwargs.items() if k in allowed}
+        return ResolverConfig(**filtered)
+    except Exception:
+        return None
+
+
+def _default_dep_cache(rules_path: str) -> Path:
+    if rules_path:
+        p = Path(rules_path)
+        if p.is_dir():
+            return p / "modid_map.json"
+        return p.parent / "modid_map.json"
+    return Path("rules") / "modid_map.json"
+
+
 def cmd_apply(a):
     ids = read_list(Path(a.list))
     if not ids:
@@ -212,7 +245,8 @@ def cmd_apply(a):
     sep_w = a.sep_workshop
     sep_m = a.sep_mods
 
-    workshop_dir.mkdir(parents=True, exist_ok=True)
+    if not a.dry_run:
+        workshop_dir.mkdir(parents=True, exist_ok=True)
 
     # IMPORTANT: steamcmd downloads Workshop items into <install_dir>/steamapps/workshop/... by default.
     # If your server is installed elsewhere, we MUST force the same install dir, otherwise downloads land
@@ -235,6 +269,8 @@ def cmd_apply(a):
         item_dir = workshop_dir / fid
         # Backward compatible: older argparse builds may not define --force.
         if item_dir.exists() and not getattr(a, "force", False):
+            return
+        if a.dry_run:
             return
         print(f"\n[SteamCMD] Downloading workshop item {fid} ...")
         cmd = [
@@ -292,24 +328,36 @@ def cmd_apply(a):
                         all_maps.append(m)
     else:
         # Dependency auto-resolve loop
-        if a.resolve_deps:
-            cache_path = Path(a.dep_cache) if a.dep_cache else (Path(a.rules) / "modid_map.json")
-            cfg = ResolverConfig(
-                steamcmd=Path(a.steamcmd),
+        if a.resolve_deps and not a.dry_run:
+            cache_path = Path(a.dep_cache) if a.dep_cache else _default_dep_cache(a.rules)
+            search_pages = _parse_optional_int(
+                a.dep_search_pages, int(os.environ.get("DEPS_SEARCH_PAGES", "3"))
+            )
+            candidates = _parse_optional_int(
+                a.dep_candidates, int(os.environ.get("DEPS_SEARCH_CANDIDATES", "10"))
+            )
+            http_timeout = _parse_optional_int(
+                a.dep_timeout, int(os.environ.get("DEPS_SEARCH_TIMEOUT", "8"))
+            )
+            cfg = _resolver_cfg(
+                steamcmd=str(a.steamcmd),
                 workshop_dir=workshop_dir,
                 steam_install_dir=Path(force_install_dir),
                 appid=int(a.pz_appid),
-                search_pages=int(os.environ.get("DEPS_SEARCH_PAGES", "3")),
-                candidates=int(os.environ.get("DEPS_SEARCH_CANDIDATES", "10")),
-                timeout=float(os.environ.get("DEPS_SEARCH_TIMEOUT", "8")),
+                search_pages=search_pages,
+                candidates=candidates,
+                http_timeout=http_timeout,
+                timeout=float(http_timeout),
                 user_agent=os.environ.get("DEPS_USER_AGENT", "Mozilla/5.0"),
                 cache_path=cache_path,
                 verbose=True,
             )
+            if cfg is None:
+                raise SystemExit("Dependency resolver unavailable or incompatible.")
             loops = 0
             while loops < 5:
                 loops += 1
-                missing = compute_missing(set(mod_to_item.keys()), requires)
+                missing = compute_missing(mod_to_item, requires)
                 if not missing:
                     break
                 print(f"\n[Deps] Missing required mod IDs: {', '.join(sorted(missing))}")
@@ -339,21 +387,23 @@ def cmd_apply(a):
     final_workshop_ids = [w for w in sorted(workshop_ids, key=lambda x: int(x)) if w.isdigit()]
 
     # 3) Write INI (with backup)
-    ini_lines = ini_read(ini_path)
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = ini_path.with_suffix(ini_path.suffix + f".bak.{ts}")
-    backup.write_text("\n".join(ini_lines) + "\n", encoding="utf-8")
+    backup = ini_path.with_suffix(ini_path.suffix + ".bak.dry-run")
+    if not a.dry_run:
+        ini_lines = ini_read(ini_path)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = ini_path.with_suffix(ini_path.suffix + f".bak.{ts}")
+        backup.write_text("\n".join(ini_lines) + "\n", encoding="utf-8")
 
-    ini_lines = ini_set(ini_lines, "WorkshopItems", sep_w.join(final_workshop_ids))
-    ini_lines = ini_set(ini_lines, "Mods", sep_m.join(all_mod_ids))
+        ini_lines = ini_set(ini_lines, "WorkshopItems", sep_w.join(final_workshop_ids))
+        ini_lines = ini_set(ini_lines, "Mods", sep_m.join(all_mod_ids))
 
-    if a.auto_map:
-        final_maps = [m for m in all_maps if m != a.map_vanilla]
-        if a.map_vanilla and a.map_vanilla not in final_maps:
-            final_maps.append(a.map_vanilla)
-        ini_lines = ini_set(ini_lines, "Map", ";".join(final_maps))
+        if a.auto_map:
+            final_maps = [m for m in all_maps if m != a.map_vanilla]
+            if a.map_vanilla and a.map_vanilla not in final_maps:
+                final_maps.append(a.map_vanilla)
+            ini_lines = ini_set(ini_lines, "Map", ";".join(final_maps))
 
-    ini_path.write_text("\n".join(ini_lines) + "\n", encoding="utf-8")
+        ini_path.write_text("\n".join(ini_lines) + "\n", encoding="utf-8")
 
     state = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
@@ -368,7 +418,7 @@ def cmd_apply(a):
         "downloaded": downloaded,
         "forced_install_dir": str(force_install_dir),
     }
-    if a.state_out:
+    if a.state_out and not a.dry_run:
         Path(a.state_out).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print("\n[Apply] OK")
@@ -455,6 +505,7 @@ def main():
     a.add_argument("--dep-candidates", default="", help="Override max candidates per modId")
     a.add_argument("--dep-timeout", default="", help="Override HTTP timeout for dependency resolver")
     a.add_argument("--state-out", default="")
+    a.add_argument("--dry-run", action="store_true", help="Skip downloads and INI writes")
     a.set_defaults(fn=cmd_apply)
 
     r=sub.add_parser("report")
