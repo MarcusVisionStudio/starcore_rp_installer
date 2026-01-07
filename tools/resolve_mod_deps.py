@@ -214,7 +214,12 @@ def workshop_search_candidates(modid: str, pages: int, timeout_s: int) -> List[s
     return ids
 
 
-def steamcmd_download(steamcmd: str, steam_install_dir: Path, item_id: str) -> bool:
+def steamcmd_download(
+    steamcmd: str,
+    steam_install_dir: Path,
+    item_id: str,
+    timeout_s: Optional[float] = None,
+) -> bool:
     cmd = [
         steamcmd,
         "+force_install_dir",
@@ -228,11 +233,20 @@ def steamcmd_download(steamcmd: str, steam_install_dir: Path, item_id: str) -> b
         "+quit",
     ]
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout_s,
+        )
         ok = proc.returncode == 0
         if not ok:
             eprint(f"[deps] steamcmd failed for {item_id}:\n{proc.stdout[-2000:]}")
         return ok
+    except subprocess.TimeoutExpired:
+        eprint(f"[deps] steamcmd timed out for {item_id}")
+        return False
     except FileNotFoundError:
         eprint(f"[deps] steamcmd not found: {steamcmd}")
         return False
@@ -273,7 +287,7 @@ def resolve_one(modid: str, cfg: ResolverConfig, cache: Dict[str, str]) -> Optio
     for wid in candidates:
         # if not installed, download first
         if not (cfg.workshop_dir / wid).exists():
-            ok = steamcmd_download(cfg.steamcmd, cfg.steam_install_dir, wid)
+            ok = steamcmd_download(cfg.steamcmd, cfg.steam_install_dir, wid, cfg.timeout)
             if not ok:
                 continue
 
