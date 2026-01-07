@@ -12,7 +12,7 @@ usage() {
   echo "Usage:"
   echo "  $0 verify <mods.list>"
   echo "  $0 freshness <mods.list>"
-  echo "  $0 apply <mods.list> [--no-restart]"
+  echo "  $0 apply <mods.list> [--no-restart] [--dry-run]"
   echo "  $0 report <mods.list>"
   exit 1
 }
@@ -40,7 +40,17 @@ if [[ ! -f "$listfile" ]]; then
 fi
 
 restart="true"
-if [[ "${3:-}" == "--no-restart" ]]; then restart="false"; fi
+dry_run="false"
+for arg in "${@:3}"; do
+  case "$arg" in
+    --no-restart)
+      restart="false"
+      ;;
+    --dry-run)
+      dry_run="true"
+      ;;
+  esac
+done
 
 case "$cmd" in
   verify)
@@ -77,6 +87,11 @@ case "$cmd" in
       resolve_args=(--resolve-deps --dep-cache "$DIR/rules/modid_map.json")
     fi
 
+    apply_args=()
+    if [[ "$dry_run" == "true" ]]; then
+      apply_args+=(--dry-run)
+    fi
+
     python3 "$PY" apply \
       --list "$listfile" \
       --steamcmd "$STEAMCMD" \
@@ -86,6 +101,7 @@ case "$cmd" in
       --sep-workshop "$SEP_WORKSHOP" \
       --sep-mods "$SEP_MODS" \
       --state-out "$STATE" \
+      "${apply_args[@]}" \
       "${resolve_args[@]}" \
       "${auto_map_args[@]}" \
       "${rules_args[@]}"
